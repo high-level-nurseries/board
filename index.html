@@ -8,7 +8,6 @@
 <link rel="icon" id="fav" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
-<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
 :root{
   --bg:#f6f5f1;--card:#ffffff;--ink:#1f1f1d;--muted:#6b6a64;--line:#e6e4dc;
@@ -86,6 +85,7 @@ td.n{direction:ltr;text-align:left;white-space:nowrap}
     <div><h1>لوحة مجلس الإدارة</h1><div class="sub" id="meta"></div></div>
     <div class="sp"></div>
     <button class="btn" id="refresh">تحديث</button>
+    <button class="btn" id="logout" title="خروج من هذا الجهاز">خروج</button>
   </header>
 
   <section class="sec fin">
@@ -116,8 +116,12 @@ document.querySelectorAll('img.logo').forEach(function(i){i.src=LOGO});document.
 var API_URL = 'https://script.google.com/macros/s/AKfycbwOHZH-hlziKZeVTzM2lnJEecWNnldS91ngW_Zbc7XOzuw_JoMi1Vl_J6qqVCcI1eiG/exec';
 var CLIENT_ID = '1032562749843-fgn2v6chd6funotieibckn6jtv57hc0t.apps.googleusercontent.com';
 
-var idToken = null, DATA = null;
+var DATA = null, busy = false;
 var BR = {N7:'فرع N7', N8:'فرع N8', ALL:'الإجمالي'};
+var K_SES='hlBoardSession', K_DATA='hlBoardData';
+function lsGet(k){try{return localStorage.getItem(k)}catch(e){return null}}
+function lsSet(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+function lsDel(k){try{localStorage.removeItem(k)}catch(e){}}
 
 function $(id){return document.getElementById(id)}
 function fmt(n){return Number(n||0).toLocaleString('en-US',{maximumFractionDigits:0})}
@@ -128,41 +132,80 @@ function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return
 var MONTHS=['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
 function mName(m){var p=m.split('-');return MONTHS[+p[1]-1]+' '+p[0]}
 
-window.onload=function(){
-  var tries=0;(function init(){
-    if(!window.google||!google.accounts){if(tries++<50)return setTimeout(init,100);$('loginErr').textContent='تعذّر تحميل تسجيل الدخول. تأكد من الاتصال.';return;}
-    google.accounts.id.initialize({client_id:CLIENT_ID,callback:onCred,auto_select:true,ux_mode:'popup'});
+/* الفتح: إذا الجهاز معروف تظهر آخر أرقام فورًا ثم تتحدث بالخلفية — بدون أي خطوة دخول */
+(function start(){
+  $('refresh').onclick=function(){fetchData({refresh:true})};
+  $('logout').onclick=logout;
+  var ses=lsGet(K_SES);
+  if(ses){
+    var cached=lsGet(K_DATA);
+    if(cached){try{DATA=JSON.parse(cached);render(true)}catch(e){}}
+    fetchData({});
+    document.addEventListener('visibilitychange',function(){if(!document.hidden&&DATA)fetchData({})});
+  } else {
+    showLogin('');
+  }
+})();
+
+/* زر Google يُحمَّل فقط عند الحاجة (أول مرة من الجهاز) */
+var gisLoaded=false;
+function loadGoogle(){
+  if(gisLoaded)return;gisLoaded=true;
+  var sc=document.createElement('script');sc.src='https://accounts.google.com/gsi/client';sc.async=true;
+  sc.onload=function(){
+    google.accounts.id.initialize({client_id:CLIENT_ID,callback:function(r){fetchData({idToken:r.credential})},auto_select:true,ux_mode:'popup'});
     google.accounts.id.renderButton($('gbtn'),{theme:'outline',size:'large',text:'signin_with',shape:'pill',locale:'ar'});
     google.accounts.id.prompt();
-  })();
-  $('refresh').onclick=function(){load(true)};
-};
-
-function onCred(r){idToken=r.credential;load(false)}
-
-function load(refresh){
-  $('loginErr').textContent='';
-  if($('app').style.display!=='none') $('meta').textContent='جارٍ التحديث…';
-  else $('gbtn').insertAdjacentHTML('afterend','<div class="muted" id="ld">جارٍ تحميل البيانات…</div>');
-  fetch(API_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({idToken:idToken,refresh:!!refresh})})
-  .then(function(r){return r.json()})
-  .then(function(res){
-    var ld=$('ld');if(ld)ld.remove();
-    if(!res.ok){showLogin(res.error);return}
-    DATA=res.data;render();
-  })
-  .catch(function(){var ld=$('ld');if(ld)ld.remove();showLogin('تعذّر الاتصال بالنظام. حاول مرة أخرى.')});
+  };
+  sc.onerror=function(){$('loginErr').textContent='تعذّر تحميل تسجيل الدخول. تأكد من الاتصال.'};
+  document.head.appendChild(sc);
 }
 
-function showLogin(msg){$('app').style.display='none';$('login').style.display='flex';$('loginErr').textContent=msg||''}
+function fetchData(opt){
+  if(busy)return;busy=true;
+  var body={refresh:!!opt.refresh};
+  if(opt.idToken)body.idToken=opt.idToken;else body.session=lsGet(K_SES);
+  if($('app').style.display!=='none')$('meta').textContent=metaText()+' — جارٍ التحديث…';
+  else $('loginErr').innerHTML='<span class="muted">جارٍ تحميل البيانات…</span>';
+  fetch(API_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(body)})
+  .then(function(r){return r.json()})
+  .then(function(res){
+    busy=false;
+    if(!res.ok){
+      if(res.sessionInvalid){lsDel(K_SES);lsDel(K_DATA);DATA=null}
+      if(DATA&&!res.sessionInvalid){$('meta').textContent=metaText()+' — تعذّر التحديث';return}
+      showLogin(res.error);return;
+    }
+    if(res.session)lsSet(K_SES,res.session);
+    DATA=res.data;lsSet(K_DATA,JSON.stringify(DATA));render(false);
+  })
+  .catch(function(){
+    busy=false;
+    if(DATA){$('meta').textContent=metaText()+' — لا يوجد اتصال، تُعرض آخر أرقام';return}
+    showLogin('تعذّر الاتصال بالنظام. حاول مرة أخرى.');
+  });
+}
+
+function logout(){
+  var ses=lsGet(K_SES);
+  if(ses)fetch(API_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({logout:true,session:ses})}).catch(function(){});
+  lsDel(K_SES);lsDel(K_DATA);DATA=null;
+  try{google.accounts.id.disableAutoSelect()}catch(e){}
+  showLogin('تم الخروج من هذا الجهاز.');
+}
+
+function metaText(){return 'أهلًا '+(DATA.viewer.name||'')+' — آخر تحديث '+DATA.generatedAt}
+
+function showLogin(msg){$('app').style.display='none';$('login').style.display='flex';$('loginErr').textContent=msg||'';loadGoogle()}
 
 function circle(group,key,big,unit,mini,label){
   return '<button class="c" data-g="'+group+'" data-k="'+key+'"><div class="circ"><span class="big">'+big+'</span><span class="small">'+unit+'</span>'+(mini?'<span class="mini">'+mini+'</span>':'')+'</div><span class="lbl">'+label+'</span></button>';
 }
 
-function render(){
+function render(fromCache){
+  var open=document.querySelector('.c.on');var og=open&&open.dataset.g,ok=open&&open.dataset.k;
   $('login').style.display='none';$('app').style.display='block';
-  $('meta').textContent='أهلًا '+(DATA.viewer.name||'')+' — آخر تحديث '+DATA.generatedAt;
+  $('meta').textContent=metaText()+(fromCache?' — جارٍ التحديث…':'');
   $('fyLbl').textContent='('+DATA.fyLabel+')';
   var keys=['N7','N8','ALL'];
   $('finRow').innerHTML=keys.map(function(k){var f=DATA.finance[k];
@@ -171,6 +214,7 @@ function render(){
   $('stuRow').innerHTML=keys.map(function(k){return circle('stu',k,DATA.students[k].count,'طالبًا',null,BR[k])}).join('');
   document.querySelectorAll('.c').forEach(function(b){b.onclick=function(){toggle(b)}});
   ['finDet','teaDet','stuDet'].forEach(function(id){$(id).classList.remove('show')});
+  if(og){var b=document.querySelector('.c[data-g="'+og+'"][data-k="'+ok+'"]');if(b)toggle(b)}
 }
 
 function toggle(b){
